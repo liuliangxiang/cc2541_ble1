@@ -68,6 +68,7 @@
 #include "gattservapp.h"
 #include "devinfoservice.h"
 #include "simpleGATTprofile.h"
+//#include "battservice.h"
 
 #if defined( CC2540_MINIDK )
   #include "simplekeys.h"
@@ -83,6 +84,10 @@
   #include "oad.h"
   #include "oad_target.h"
 #endif
+#include "Npi.h"
+#include "stdio.h"
+#include "hal_uart.h"
+
 
 /*********************************************************************
  * MACROS
@@ -228,14 +233,16 @@ static void peripheralStateNotificationCB( gaprole_States_t newState );
 static void performPeriodicTask( void );
 static void simpleProfileChangeCB( uint8 paramID );
 
-#if defined( CC2540_MINIDK )
+//#if defined( CC2540_MINIDK )
 static void simpleBLEPeripheral_HandleKeys( uint8 shift, uint8 keys );
-#endif
+//#endif
 
 #if (defined HAL_LCD) && (HAL_LCD == TRUE)
 static char *bdAddr2Str ( uint8 *pAddr );
 #endif // (defined HAL_LCD) && (HAL_LCD == TRUE)
 
+// ??????
+static void simpleBLE_NpiSerialCallback( uint8 port, uint8 events );
 
 
 /*********************************************************************
@@ -261,6 +268,25 @@ static simpleProfileCBs_t simpleBLEPeripheral_SimpleProfileCBs =
 {
   simpleProfileChangeCB    // Charactersitic value change callback
 };
+
+// 继电器控制   // P1.3 控制继电器的开关
+// ?????   // P1.3 ????????
+void RelayONOff(bool onoff)
+{
+  if(onoff == TRUE)
+  {
+     P1SEL &= ~0x08; // ?? io ??
+     P1DIR |= 0x08; // ??
+     P1_3 = 1;
+  }
+  else 
+  {
+     P1SEL &= ~0x08; // ?? io ??
+     P1DIR |= 0x08; // ??
+     P1_3 = 0;
+  }
+}
+
 /*********************************************************************
  * PUBLIC FUNCTIONS
  */
@@ -283,6 +309,11 @@ void SimpleBLEPeripheral_Init( uint8 task_id )
 {
   simpleBLEPeripheral_TaskID = task_id;
 
+  //Init_Para();
+
+  // ?????
+  NPI_InitTransport(simpleBLE_NpiSerialCallback);
+  NPI_WriteTransport("SimpleBLEPeripheral_Init\r\n", 26);  
   // Setup the GAP
   VOID GAP_SetParamValue( TGAP_CONN_PAUSE_PERIPHERAL, DEFAULT_CONN_PAUSE_PERIPHERAL );
   
@@ -352,6 +383,7 @@ void SimpleBLEPeripheral_Init( uint8 task_id )
   GGS_AddService( GATT_ALL_SERVICES );            // GAP
   GATTServApp_AddService( GATT_ALL_SERVICES );    // GATT attributes
   DevInfo_AddService();                           // Device Information Service
+//  Batt_AddService();                              // Batt Service
   SimpleProfile_AddService( GATT_ALL_SERVICES );  // Simple GATT Profile
 #if defined FEATURE_OAD
   VOID OADTarget_AddService();                    // OAD Profile
@@ -398,8 +430,15 @@ void SimpleBLEPeripheral_Init( uint8 task_id )
   P0 = 0x03; // All pins on port 0 to low except for P0.0 and P0.1 (buttons)
   P1 = 0;   // All pins on port 1 to low
   P2 = 0;   // All pins on port 2 to low
+#else
+  HalLedSet( (HAL_LED_1 | HAL_LED_2 | HAL_LED_3), HAL_LED_MODE_OFF );
+
+  SK_AddService( GATT_ALL_SERVICES );         // Simple Keys Profile
+
+  RegisterForKeys( simpleBLEPeripheral_TaskID );   //  一定需要添加这个， 否则按键不起作用
 
 #endif // #if defined( CC2540_MINIDK )
+  RelayONOff(FALSE);  
 
 #if (defined HAL_LCD) && (HAL_LCD == TRUE)
 
@@ -514,12 +553,12 @@ static void simpleBLEPeripheral_ProcessOSALMsg( osal_event_hdr_t *pMsg )
 {
   switch ( pMsg->event )
   {     
-  #if defined( CC2540_MINIDK )
+  //#if defined( CC2540_MINIDK )
     case KEY_CHANGE:
       simpleBLEPeripheral_HandleKeys( ((keyChange_t *)pMsg)->state, 
                                       ((keyChange_t *)pMsg)->keys );
       break;
-  #endif // #if defined( CC2540_MINIDK )
+ // #endif // #if defined( CC2540_MINIDK )
  
     case GATT_MSG_EVENT:
       // Process GATT message
@@ -815,6 +854,60 @@ static void performPeriodicTask( void )
   }
 }
 
+uint8 simpleProfileReadConfig(uint16 uuid, uint8 *newValue)
+{
+    uint8 len = 0;
+
+    switch ( uuid )
+    {
+      case SIMPLEPROFILE_CHAR1_UUID:
+      case SIMPLEPROFILE_CHAR2_UUID:
+      case SIMPLEPROFILE_CHAR4_UUID:
+        break;
+
+      case SIMPLEPROFILE_CHAR5_UUID:
+        HalLcdWriteString( "Char 5 read", HAL_LCD_LINE_3 );
+        break;
+
+      case SIMPLEPROFILE_CHAR6_UUID:
+      {
+        break;
+      }
+      case SIMPLEPROFILE_CHAR7_UUID:
+        HalLcdWriteString( "Char 7 read", HAL_LCD_LINE_3 );     
+        break;
+
+      case SIMPLEPROFILE_CHAR8_UUID:
+        HalLcdWriteString( "Char 8 read", HAL_LCD_LINE_3 );
+        break;
+
+      case SIMPLEPROFILE_CHAR9_UUID:
+        HalLcdWriteString( "Char 9 read", HAL_LCD_LINE_3 );
+        HalAdcSetReference( HAL_ADC_REF_AVDD );
+        {
+            uint16 adc4, adc5;
+            // 注意， 14bit采样时，仅13bit有效，故 需要  &0x1fff, 这个就别问阿莫我了， 详见数据手册
+            adc4 = HalAdcRead( HAL_ADC_CHANNEL_4, HAL_ADC_RESOLUTION_14 ) & 0x1fff;
+            adc5 = HalAdcRead( HAL_ADC_CHANNEL_5, HAL_ADC_RESOLUTION_14 ) & 0x1fff;
+            newValue[len++] = adc4>>8;
+            newValue[len++] = adc4 & 0xFF;
+            newValue[len++] = adc5>>8;
+            newValue[len++] = adc5 & 0xFF;
+        }
+        break;
+
+      case SIMPLEPROFILE_CHARA_UUID:// pwm
+        HalLcdWriteString( "Char A read", HAL_LCD_LINE_3 );       
+        break;
+       
+    default:
+      len = 0;
+    }
+    
+    return len;
+}
+
+
 /*********************************************************************
  * @fn      simpleProfileChangeCB
  *
@@ -887,6 +980,35 @@ char *bdAddr2Str( uint8 *pAddr )
   return str;
 }
 #endif // (defined HAL_LCD) && (HAL_LCD == TRUE)
+
+// 串口回调函数
+static void simpleBLE_NpiSerialCallback( uint8 port, uint8 events )
+{
+    (void)port;
+    
+    if (events & (HAL_UART_RX_TIMEOUT | HAL_UART_RX_FULL))   //串口有数据
+    {
+        uint8 numBytes = 0;
+
+        numBytes = NPI_RxBufLen();           //读出串口缓冲区有多少字节
+        
+        if(numBytes > 0)
+        {
+            uint8 *buffer = osal_mem_alloc(numBytes);            
+            if(buffer)
+            {
+                // 读出串口数据
+                NPI_ReadTransport(buffer,numBytes);  
+#if 0
+                // 作为测试， 把读到的数据也通过串口返回， 这只是一个test功能， 你可以把去掉
+                NPI_WriteTransport(buffer,numBytes);  
+#endif              
+                osal_mem_free(buffer);
+            }
+        }
+    }
+}
+
 
 /*********************************************************************
 *********************************************************************/
